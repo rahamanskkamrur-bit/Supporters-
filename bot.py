@@ -198,3 +198,331 @@ async def route_oncall_ping(channel: discord.abc.Messageable, guild: discord.Gui
         view=ClaimRequestView(),
     )
     return f"🔔 Pinged **`{len(oncall_ids)}`** On-Call support agent(s) in chat!"
+
+# =====================================================================
+# PART 2 OF 2 — PASTE THIS DIRECTLY BELOW PART 1
+# =====================================================================
+class ClaimRequestView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Claim Request", style=discord.ButtonStyle.success, emoji="✅", custom_id="oc:claim")
+    async def b_claim(self, i: discord.Interaction, b: discord.ui.Button):
+        if not is_staff(i.user):
+            return await i.response.send_message("❌ Staff only.", ephemeral=True)
+        b.disabled = True
+        b.label = f"Claimed by {i.user.display_name}"[:75]
+        b.style = discord.ButtonStyle.secondary
+        updated = f"{i.message.content}\n\n✅ **Claimed by {i.user.mention}!**"
+        await i.response.edit_message(content=updated[:1990], view=self)
+
+
+class DeflectActionView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="That Fixed It!", style=discord.ButtonStyle.success, emoji="✅", custom_id="faq:ok")
+    async def b_ok(self, i: discord.Interaction, b: discord.ui.Button):
+        for c in self.children:
+            c.disabled = True
+        await i.response.edit_message(
+            content=f"{i.message.content}\n\n✅ **Marked as Resolved by {i.user.mention}!** *(No staff ping needed)*"[:1990],
+            view=self,
+        )
+
+    @discord.ui.button(label="Still Need Human Staff", style=discord.ButtonStyle.danger, emoji="🙋‍♂️", custom_id="faq:staff")
+    async def b_staff(self, i: discord.Interaction, b: discord.ui.Button):
+        b.disabled = True
+        b.label = "Staff Notified"
+        m = re.search(r"\*\*Question:\*\*\s*(.+)", i.message.content or "")
+        issue = m.group(1).strip() if m else "Needs human staff assistance"
+        await i.response.edit_message(view=self)
+        note = await route_oncall_ping(i.channel, i.guild, i.user, issue)
+        await i.followup.send(note, ephemeral=True)
+
+
+class AskSupportModal(discord.ui.Modal, title="❓ Ask Instant Support"):
+    q = discord.ui.TextInput(
+        label="What do you need help with?",
+        placeholder="e.g. How do I verify with Bloxlink or appeal a warning?",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=400,
+    )
+
+    async def on_submit(self, i: discord.Interaction):
+        await i.response.defer()
+        ans, _ = await get_faq_reply(i.guild.id, i.user.display_name, self.q.value)
+        await i.followup.send(
+            content=(
+                f"🤖 **AI First-Responder** for {i.user.mention}\n"
+                f"❓ **Question:** {self.q.value}\n"
+                f"💬 **Answer:** {ans}\n\n"
+                f"*Did this fix your issue? Tap a button below:*"
+            )[:1990],
+            view=DeflectActionView(),
+        )
+
+
+class SupportDeskView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Ask Support (Instant Answer)", style=discord.ButtonStyle.primary, emoji="❓", custom_id="sd:ask")
+    async def b_ask(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_modal(AskSupportModal())
+
+    @discord.ui.button(label="Check On-Call Staff", style=discord.ButtonStyle.secondary, emoji="🟢", custom_id="sd:who")
+    async def b_who(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_message(format_oncall_board(i.guild), ephemeral=True)
+
+
+class OnCallControlView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Go On-Call", style=discord.ButtonStyle.success, emoji="🟢", custom_id="occ:on", row=0)
+    async def b_on(self, i: discord.Interaction, b: discord.ui.Button):
+        if not is_staff(i.user):
+            return await i.response.send_message("❌ Staff only.", ephemeral=True)
+        d = gdata(i.guild.id)
+        if i.user.id not in d["oncall"]:
+            d["oncall"].append(i.user.id)
+            save_data()
+        await i.response.edit_message(content=format_oncall_board(i.guild), view=self)
+        await i.followup.send("🟢 You are now **ON-CALL** and will be pinged for human support requests.", ephemeral=True)
+
+    @discord.ui.button(label="Go Off-Call", style=discord.ButtonStyle.danger, emoji="🔴", custom_id="occ:off", row=0)
+    async def b_off(self, i: discord.Interaction, b: discord.ui.Button):
+        if not is_staff(i.user):
+            return await i.response.send_message("❌ Staff only.", ephemeral=True)
+        d = gdata(i.guild.id)
+        if i.user.id in d["oncall"]:
+            d["oncall"].remove(i.user.id)
+            save_data()
+        await i.response.edit_message(content=format_oncall_board(i.guild), view=self)
+        await i.followup.send("🔴 You are now **OFF-CALL** — you will not be pinged.", ephemeral=True)
+
+    @discord.ui.button(label="Pause / Resume Pings", style=discord.ButtonStyle.secondary, emoji="🔔", custom_id="occ:tog", row=1)
+    async def b_tog(self, i: discord.Interaction, b: discord.ui.Button):
+        if not is_staff(i.user):
+            return await i.response.send_message("❌ Staff only.", ephemeral=True)
+        d = gdata(i.guild.id)
+        d["pings_on"] = not d["pings_on"]
+        save_data()
+        await i.response.edit_message(content=format_oncall_board(i.guild), view=self)
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, emoji="🔄", custom_id="occ:ref", row=1)
+    async def b_ref(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.edit_message(content=format_oncall_board(i.guild), view=self)
+
+
+# --- 5. BOT CORE & SLASH COMMANDS ---
+class SupportOnCallBot(commands.Bot):
+    def __init__(self, mi: bool = True):
+        it = discord.Intents.default()
+        it.message_content = mi
+        super().__init__(command_prefix="!", intents=it, help_command=None)
+        self._synced = False
+
+    async def setup_hook(self):
+        for v in (ClaimRequestView(), DeflectActionView(), SupportDeskView(), OnCallControlView()):
+            self.add_view(v)
+        if not self._synced:
+            try:
+                await self.tree.sync()
+                self._synced = True
+            except Exception as e:
+                print(f"Sync: {e}")
+
+    async def on_ready(self):
+        global STATUS
+        STATUS = f"ONLINE as {self.user}"
+        print(f"✅ AI FAQ & On-Call Ping Controller ONLINE: {self.user}")
+
+    async def on_message(self, msg: discord.Message):
+        if msg.author.bot or not msg.guild:
+            return
+        await self.process_commands(msg)
+
+        d = gdata(msg.guild.id)
+        txt = (msg.content or "").strip()
+        if not txt or txt.startswith("!"):
+            return
+
+        # 1. Ping Controller: if someone manually pings the Staff Role, route cleanly to On-Call staff
+        srid = d["staff_role"]
+        if srid and any(r.id == srid for r in msg.role_mentions) and not is_staff(msg.author):
+            if not d["pings_on"]:
+                return await msg.reply("🔕 **Ping Controller:** Staff pings are currently paused. Ask your question here or use `/ask` for instant AI help!")
+            if d["oncall"]:
+                pings = " ".join(f"<@{u}>" for u in d["oncall"][:15])
+                return await msg.reply(f"🎧 **On-Call Router:** Routing your ping to On-Call agents: {pings}", view=ClaimRequestView())
+
+        # 2. AI First-Responder: replies when pinged OR inside the configured support channel
+        pinged = self.user in msg.mentions
+        in_sup_ch = d["support_ch"] and msg.channel.id == d["support_ch"] and not is_staff(msg.author)
+        if not (pinged or in_sup_ch):
+            return
+
+        clean = re.sub(rf"<@!?{self.user.id}>", "", txt).strip()
+        if not clean:
+            return await msg.reply("🤖 Ping me with your question (or use `/ask`), and I'll check our FAQs right away!")
+
+        async with msg.channel.typing():
+            ans, matched = await get_faq_reply(msg.guild.id, msg.author.display_name, clean)
+        if in_sup_ch and not pinged and not matched and not clean.endswith("?"):
+            return
+
+        await msg.reply(
+            content=(
+                f"🤖 **AI First-Responder** for {msg.author.mention}\n"
+                f"❓ **Question:** {clean[:300]}\n"
+                f"💬 **Answer:** {ans}\n\n"
+                f"*Did this fix your issue?*"
+            )[:1990],
+            view=DeflectActionView(),
+        )
+
+
+def reg_cmds(bot: SupportOnCallBot):
+    @bot.tree.command(name="support_setup", description="Set Staff Role, optional auto-answer Support Channel & Ping Cooldown")
+    async def s_set(i: discord.Interaction, staff_role: discord.Role, support_channel: discord.TextChannel = None, ping_cooldown_seconds: int = 120):
+        if not i.user.guild_permissions.administrator:
+            return await i.response.send_message("❌ Administrators only.", ephemeral=True)
+        d = gdata(i.guild.id)
+        d["staff_role"] = staff_role.id
+        d["support_ch"] = support_channel.id if support_channel else 0
+        d["cooldown"] = max(15, min(ping_cooldown_seconds, 3600))
+        save_data()
+        await i.response.send_message(
+            f"✅ **Support & Ping Controller Configured!**\n"
+            f"🛡️ **Staff Role:** {staff_role.mention}\n"
+            f"💬 **Auto-Answer Channel:** {support_channel.mention if support_channel else '*Ping/Command Only*'}\n"
+            f"⏱️ **Ping Cooldown:** `{d['cooldown']}s`\n\n"
+            f"👉 Next: Run `/oncall_panel` in staff chat and `/support_panel` in your support channel!",
+            ephemeral=True,
+        )
+
+    @bot.tree.command(name="oncall_panel", description="Post the plain-text On-Call & Ping Controller panel")
+    async def s_ocp(i: discord.Interaction):
+        if not is_staff(i.user):
+            return await i.response.send_message("❌ Staff only.", ephemeral=True)
+        await i.response.send_message(content=format_oncall_board(i.guild), view=OnCallControlView())
+
+    @bot.tree.command(name="support_panel", description="Post the plain-text AI Support Desk panel")
+    async def s_sp(i: discord.Interaction):
+        if not is_staff(i.user):
+            return await i.response.send_message("❌ Staff only.", ephemeral=True)
+        await i.response.send_message(content=format_support_panel(i.guild), view=SupportDeskView())
+
+    @bot.tree.command(name="oncall", description="Quickly toggle yourself On-Call or Off-Call")
+    async def s_oc(i: discord.Interaction):
+        if not is_staff(i.user):
+            return await i.response.send_message("❌ Staff only.", ephemeral=True)
+        d = gdata(i.guild.id)
+        if i.user.id in d["oncall"]:
+            d["oncall"].remove(i.user.id)
+            msg = f"🔴 {i.user.mention} is now **OFF-CALL**."
+        else:
+            d["oncall"].append(i.user.id)
+            msg = f"🟢 {i.user.mention} is now **ON-CALL** for support pings!"
+        save_data()
+        await i.response.send_message(msg)
+
+    @bot.tree.command(name="ping_control", description="Pause/Resume On-Call pings or update cooldown seconds")
+    async def s_pc(i: discord.Interaction, pings_enabled: bool, cooldown_seconds: int = None):
+        if not is_staff(i.user):
+            return await i.response.send_message("❌ Staff only.", ephemeral=True)
+        d = gdata(i.guild.id)
+        d["pings_on"] = pings_enabled
+        if cooldown_seconds is not None:
+            d["cooldown"] = max(15, min(cooldown_seconds, 3600))
+        save_data()
+        state = "🔔 ENABLED" if d["pings_on"] else "🔕 PAUSED"
+        await i.response.send_message(f"⚙️ **Ping Controller Updated:** {state} • Cooldown: `{d['cooldown']}s`")
+
+    @bot.tree.command(name="ask", description="Ask the AI First-Responder & FAQ Deflector a question")
+    async def s_ask(i: discord.Interaction, question: str):
+        await i.response.defer()
+        ans, _ = await get_faq_reply(i.guild.id, i.user.display_name, question)
+        await i.followup.send(
+            content=(
+                f"🤖 **AI First-Responder** for {i.user.mention}\n"
+                f"❓ **Question:** {question[:300]}\n"
+                f"💬 **Answer:** {ans}\n\n"
+                f"*Did this fix your issue?*"
+            )[:1990],
+            view=DeflectActionView(),
+        )
+
+    @bot.tree.command(name="ping_staff", description="Ping only On-Call staff through the Smart Ping Controller")
+    async def s_ps(i: discord.Interaction, issue: str):
+        await i.response.defer(ephemeral=True)
+        note = await route_oncall_ping(i.channel, i.guild, i.user, issue)
+        await i.followup.send(note, ephemeral=True)
+
+    @bot.tree.command(name="add_faq", description="Add a Q&A entry to the AI First-Responder's knowledge base")
+    async def s_af(i: discord.Interaction, question_keywords: str, answer: str):
+        if not is_staff(i.user):
+            return await i.response.send_message("❌ Staff only.", ephemeral=True)
+        d = gdata(i.guild.id)
+        d["faqs"].append({"q": question_keywords.strip()[:150], "a": answer.strip()[:600]})
+        save_data()
+        await i.response.send_message(f"✅ **FAQ Added (#{len(d['faqs'])})!**\n❓ `{question_keywords[:120]}`\n💬 {answer[:300]}", ephemeral=True)
+
+    @bot.tree.command(name="remove_faq", description="Remove a saved FAQ by its number from /list_faqs")
+    async def s_rf(i: discord.Interaction, number: int):
+        if not is_staff(i.user):
+            return await i.response.send_message("❌ Staff only.", ephemeral=True)
+        faqs = gdata(i.guild.id)["faqs"]
+        if number < 1 or number > len(faqs):
+            return await i.response.send_message(f"❌ Choose a number between `1` and `{len(faqs)}`.", ephemeral=True)
+        removed = faqs.pop(number - 1)
+        save_data()
+        await i.response.send_message(f"🗑️ Removed FAQ #{number}: `{removed['q']}`", ephemeral=True)
+
+    @bot.tree.command(name="list_faqs", description="Show all saved Server FAQs in plain chat text")
+    async def s_lf(i: discord.Interaction):
+        faqs = gdata(i.guild.id)["faqs"]
+        if not faqs:
+            return await i.response.send_message("📋 No FAQs saved yet! Staff can add them with `/add_faq`.", ephemeral=True)
+        lines = [f"**{n}. {f['q']}**\n> {f['a']}" for n, f in enumerate(faqs, 1)]
+        await i.response.send_message("📋 **SAVED SERVER FAQS**\n━━━━━━━━━━━━━━━━━━━━━━\n" + "\n\n".join(lines)[:1850], ephemeral=True)
+
+
+async def main():
+    global STATUS
+    await run_web()
+    asyncio.create_task(self_ping())
+    if not TOKEN:
+        STATUS = "MISSING BOT_TOKEN"
+        while True:
+            await asyncio.sleep(3600)
+    mi, w = True, 90
+    while True:
+        bot = SupportOnCallBot(mi)
+        reg_cmds(bot)
+        try:
+            await bot.start(TOKEN)
+            break
+        except discord.PrivilegedIntentsRequired:
+            await bot.close()
+            mi = False
+        except discord.HTTPException as e:
+            await bot.close()
+            if e.status == 429:
+                STATUS = f"429 wait {w}s"
+                await asyncio.sleep(w)
+                w = min(w + 60, 300)
+            else:
+                await asyncio.sleep(60)
+        except Exception as e:
+            await bot.close()
+            STATUS = f"Retry ({type(e).__name__})"
+            await asyncio.sleep(60)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+    
